@@ -2,24 +2,22 @@
 // Renders the profile SVGs in the language of desktop-design-system: one glass
 // material, achromatic chrome, colour only where content lives.
 //
-//   GITHUB_TOKEN=$(gh auth token) node scripts/build.mjs           banner, cards, activity
-//   node scripts/build.mjs --brand                                  + avatar and social previews
+//   node scripts/build.mjs           banner (dark + light)
+//   node scripts/build.mjs --brand   + avatar and social previews
 //
-// Without a token the activity card is skipped. The banner's wallpaper hue
-// drifts a little every day, the way the desktop palette follows the wallpaper.
+// The banner's wallpaper hue drifts a little every day, the way the desktop
+// palette follows the wallpaper; the daily workflow commits the new banner.
 
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const LOGIN = process.env.GH_LOGIN ?? 'aleksandr-mazhul';
-const TOKEN = process.env.GITHUB_TOKEN;
 const BRAND = process.argv.includes('--brand');
 
 // Profile README column is ~840px, so tokens below map close to 1:1.
 const WIDTH = 840;
 const RADIUS_SURFACE = 30; // radius.surface
-const RADIUS_ELEMENT = 14; // radius.element
 
 const BANNER = {
   eyebrow: 'ARCH  ·  HYPRLAND  ·  QUICKSHELL',
@@ -27,7 +25,7 @@ const BANNER = {
   tagline: 'Calm software and a glass-first Linux desktop.',
 };
 
-// Single source for repo descriptions on cards and social previews.
+// Single source for repo descriptions on social previews.
 export const PROJECTS = [
   {
     repo: 'dotfiles',
@@ -65,7 +63,6 @@ const THEMES = {
     wallOpacity: 0.42,
     grain: 0.06,
     accent: '#9da1ff',
-    cellEmpty: 0.07,
   },
   light: {
     fg: '0,0,0',
@@ -79,13 +76,8 @@ const THEMES = {
     wallOpacity: 0.75,
     grain: 0.045,
     accent: '#6b6fe6',
-    cellEmpty: 0.06,
   },
 };
-
-const LEVELS = { NONE: 0, FIRST_QUARTILE: 1, SECOND_QUARTILE: 2, THIRD_QUARTILE: 3, FOURTH_QUARTILE: 4 };
-const LEVEL_OPACITY = [0, 0.3, 0.52, 0.76, 1];
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 const ink = (t, alpha) => `rgba(${t.fg},${alpha})`;
@@ -194,33 +186,6 @@ async function banner(t) {
 `;
 }
 
-// A project card. Wide cards span the column, the rest sit two in a row.
-async function card(t, p, wide) {
-  const w = wide ? WIDTH : 412;
-  const h = 176;
-  const pad = 28;
-  const lines = wrap(p.description, wide ? 82 : 50);
-  if (lines.length > 2) throw new Error(`card ${p.repo}: description needs ${lines.length} lines, fits 2`);
-  const [lang, langColor] = p.language;
-  const meta = [lang, ...p.tags].join('  ·  ');
-  return `${svgOpen(w, h, `${p.title}: ${p.description}`)}
-  <style>${await fontFaces(['display', 'text', 'mono'])}${motion}</style>
-  ${plate(t, w, h, { r: RADIUS_SURFACE, wallStrength: 0.45, drift: false })}
-  <g class="in d1">
-    <text x="${pad}" y="${pad + 22}" font-family="${FAMILY.display}" font-size="21" letter-spacing="-0.3" fill="${ink(t, t.primary)}">${esc(p.title)}</text>
-    <text x="${w - pad}" y="${pad + 20}" text-anchor="end" font-family="${FAMILY.mono}" font-size="15" fill="${ink(t, t.tertiary)}">→</text>
-  </g>
-  <g class="in d2" font-family="${FAMILY.text}" font-size="14" fill="${ink(t, t.secondary)}">
-    ${lines.map((l, i) => `<text x="${pad}" y="${pad + 56 + i * 21}">${esc(l)}</text>`).join('')}
-  </g>
-  <g class="in d3">
-    <circle cx="${pad + 4}" cy="${h - pad - 4}" r="4" fill="${langColor}"/>
-    <text x="${pad + 16}" y="${h - pad}" font-family="${FAMILY.mono}" font-size="11" fill="${ink(t, t.tertiary)}">${esc(meta)}</text>
-  </g>
-</svg>
-`;
-}
-
 // 1280×640 Open Graph image, shown when a repo link is shared.
 async function socialPreview(t, p) {
   const w = 1280;
@@ -255,128 +220,16 @@ async function avatar(t) {
 `;
 }
 
-async function fetchCalendar() {
-  const query = `query($login:String!){user(login:$login){contributionsCollection{contributionCalendar{
-    totalContributions weeks{contributionDays{date contributionCount contributionLevel}}}}}}`;
-  const res = await fetch('https://api.github.com/graphql', {
-    method: 'POST',
-    headers: { authorization: `bearer ${TOKEN}`, 'content-type': 'application/json', 'user-agent': LOGIN },
-    body: JSON.stringify({ query, variables: { login: LOGIN } }),
-  });
-  const json = await res.json();
-  if (!res.ok || json.errors) throw new Error(`GraphQL: ${res.status} ${JSON.stringify(json.errors ?? json)}`);
-  return json.data.user.contributionsCollection.contributionCalendar;
-}
-
-function streaks(days) {
-  let longest = 0;
-  let run = 0;
-  for (const d of days) {
-    run = d.contributionCount > 0 ? run + 1 : 0;
-    longest = Math.max(longest, run);
-  }
-  // Today without commits yet does not break the current streak.
-  let i = days.length - 1;
-  if (i >= 0 && days[i].contributionCount === 0) i--;
-  let current = 0;
-  while (i >= 0 && days[i].contributionCount > 0) {
-    current++;
-    i--;
-  }
-  const busiest = days.reduce((a, b) => (b.contributionCount > a.contributionCount ? b : a), days[0]);
-  return { longest, current, busiest };
-}
-
-const fmtDate = (iso) => {
-  const [, m, d] = iso.split('-').map(Number);
-  return `${MONTHS[m - 1]} ${d}`;
-};
-const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
-
-async function activity(t, cal) {
-  const h = 256;
-  const pad = 28;
-  const gap = 3;
-  const weeks = cal.weeks;
-  const cell = Math.floor((WIDTH - 2 * pad + gap) / weeks.length) - gap;
-  const gridW = weeks.length * (cell + gap) - gap;
-  const gx = (WIDTH - gridW) / 2;
-  const gy = 98;
-
-  const cells = [];
-  const months = [];
-  let lastMonth = -1;
-  weeks.forEach((week, w) => {
-    const month = Number(week.contributionDays[0].date.slice(5, 7)) - 1;
-    if (month !== lastMonth) months.push({ w, month });
-    lastMonth = month;
-    for (const day of week.contributionDays) {
-      const row = new Date(`${day.date}T00:00:00Z`).getUTCDay();
-      const level = LEVELS[day.contributionLevel] ?? 0;
-      const fill = level ? t.accent : ink(t, t.cellEmpty);
-      const opacity = level ? ` fill-opacity="${LEVEL_OPACITY[level]}"` : '';
-      cells.push(
-        `<rect x="${gx + w * (cell + gap)}" y="${gy + row * (cell + gap)}" width="${cell}" height="${cell}" rx="3" fill="${fill}"${opacity}><title>${day.contributionCount} on ${fmtDate(day.date)}</title></rect>`,
-      );
-    }
-  });
-
-  // A sliver of a month at the left edge would collide with the next label.
-  if (months.length > 1 && months[1].w - months[0].w < 3) months.shift();
-  const monthSvg = months
-    .map(({ w, month }) => `<text x="${gx + w * (cell + gap)}" y="${gy - 12}">${MONTHS[month]}</text>`)
-    .join('');
-
-  const days = weeks.flatMap((w) => w.contributionDays);
-  const s = streaks(days);
-  const stats = [
-    ['longest streak', plural(s.longest, 'day')],
-    ['current streak', plural(s.current, 'day')],
-    ['busiest day', `${s.busiest.contributionCount} · ${fmtDate(s.busiest.date)}`],
-  ];
-  const statY = h - 30;
-  let sx = gx;
-  const statSvg = stats
-    .map(([label, value]) => {
-      const out = `<text x="${sx}" y="${statY}"><tspan fill="${ink(t, t.tertiary)}">${label}</tspan><tspan dx="8" fill="${ink(t, t.primary)}">${esc(value)}</tspan></text>`;
-      sx += (label.length + value.length + 1) * 6.6 + 36; // mono advance at 11px
-      return out;
-    })
-    .join('');
-
-  const total = cal.totalContributions.toLocaleString('en-US');
-  return `${svgOpen(WIDTH, h, `${total} contributions in the past year; longest streak ${s.longest} days`)}
-  <style>${await fontFaces(['display', 'mono'])}${motion}</style>
-  ${plate(t, WIDTH, h, { wallStrength: 0.4, drift: false })}
-  <g class="in d1">
-    <text x="${gx}" y="50" font-family="${FAMILY.display}" font-size="19" letter-spacing="-0.3" fill="${ink(t, t.primary)}">Activity</text>
-    <text x="${gx + gridW}" y="50" text-anchor="end" font-family="${FAMILY.mono}" font-size="11.5" fill="${ink(t, t.secondary)}">${total} contributions · past year</text>
-  </g>
-  <g class="in d2" font-family="${FAMILY.mono}" font-size="10.5" fill="${ink(t, t.tertiary)}">${monthSvg}</g>
-  <g class="in d2">${cells.join('')}</g>
-  <g class="in d3" font-family="${FAMILY.mono}" font-size="11">${statSvg}</g>
-</svg>
-`;
-}
-
-const cal = TOKEN ? await fetchCalendar() : null;
-if (!cal) console.warn('GITHUB_TOKEN not set: skipping activity card');
-
 const out = [];
 const emit = async (path, svg) => {
   await writeFile(`${ROOT}assets/${path}`, svg);
   out.push(path);
 };
 
-await mkdir(`${ROOT}assets/cards`, { recursive: true });
-for (const [name, theme] of Object.entries(THEMES)) {
-  await emit(`banner-${name}.svg`, await banner(theme));
-  for (const [i, p] of PROJECTS.entries()) await emit(`cards/${p.repo}-${name}.svg`, await card(theme, p, i === 0));
-  if (cal) await emit(`activity-${name}.svg`, await activity(theme, cal));
-}
+for (const [name, theme] of Object.entries(THEMES)) await emit(`banner-${name}.svg`, await banner(theme));
 if (BRAND) {
   await mkdir(`${ROOT}assets/brand`, { recursive: true });
   await emit('brand/avatar.svg', await avatar(THEMES.dark));
   for (const p of PROJECTS) await emit(`brand/social-${p.repo}.svg`, await socialPreview(THEMES.dark, p));
 }
-console.log(`built ${out.length} svgs · hue ${dailyHue()}°${cal ? ` · ${cal.totalContributions} contributions` : ''}`);
+console.log(`built ${out.length} svgs · hue ${dailyHue()}°`);
